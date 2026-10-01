@@ -1,0 +1,32 @@
+{
+  "ticker": "SPY",
+  "as_of": "2026-09-30T20:00:00Z",
+  "price": 598.20,
+  "beta": 1.0,
+  "market_return_1d": 0.0072,
+  "momentum_1d": 0.0040,
+  "ticker_return_1d": 0.0040,
+  "sector": { "name": "S&P 500 Index", "return_1d": 0.0040, "rank": null },
+  "options": {
+    "near_expiry": "2026-10-02",
+    "expiries": [
+      {
+        "expiry": "2026-10-02",
+        "strikes": [
+          { "strike": 590, "call_oi": 30000, "put_oi": 28000 },
+          { "strike": 595, "call_oi": 32000, "put_oi": 30000 },
+          { "strike": 598, "call_oi": 35000, "put_oi": 33000 },
+          { "strike": 600, "call_oi": 38000, "put_oi": 36000 },
+          { "strike": 602, "call_oi": 34000, "put_oi": 35000 },
+          { "strike": 605, "call_oi": 30000, "put_oi": 34000 }
+        ]
+      }
+    ]
+  },
+  "gex": { "net_gamma": 2400000.0, "flip_level": 600.0 },
+  "dark_pool": [
+    { "timestamp": "2026-09-30T15:05:00Z", "price": 598.10, "size": 20000, "side": "buy" },
+    { "timestamp": "2026-09-30T15:30:00Z", "price": 598.25, "size": 22000, "side": "sell" }
+  ],
+  "term_structure": { "front_iv": 0.16, "back_iv": 0.17, "put_iv": 0.17, "call_iv": 0.165 }
+}
