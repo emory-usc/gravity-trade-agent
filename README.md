@@ -141,15 +141,53 @@ gravity-trade-agent/
 │   ├── agent.py           # LangGraph agent (scan → thesis)
 │   ├── evals/             # backtest / hit-rate harness
 │   ├── data.py            # bundled sample-data loader
+│   ├── server.py          # FastAPI service (production entrypoint)
+│   ├── secret_store.py    # Key Vault via managed identity (.env fallback)
+│   ├── state_store.py     # Cosmos DB persistence (local fallback)
+│   ├── telemetry.py       # App Insights metrics (logging fallback)
 │   ├── config.py          # env-driven settings
-│   └── cli.py             # typer CLI (analyze / agent / backtest / list)
+│   └── cli.py             # typer CLI (analyze / agent / backtest / serve)
+├── infra/                 # Bicep: Container Apps, Key Vault, Cosmos, App Insights, alerts
+├── Dockerfile             # multi-stage, non-root, healthcheck
 ├── data/sample/           # illustrative ticker snapshots (NVDA, SPY)
 ├── evals/                 # sample trade log for the harness
 ├── tests/                 # pytest suite
-└── docs/framework.md      # full write-up of the six layers
+└── docs/                  # framework + Azure deployment walkthroughs
 ```
 
 ---
+
+## Azure deployment
+
+The same pipeline ships as a containerized HTTP service on Azure — reflecting
+how it actually runs in production.
+
+```mermaid
+flowchart LR
+    subgraph Azure
+        CA[Container App<br/>gravity-trade-agent]
+        MI[Managed identity]
+        KV[Key Vault<br/>openai-api-key]
+        CO[Cosmos DB<br/>signals]
+        AI[Application Insights]
+        AG[Alert rules]
+    end
+    CA -->|reads secrets via MI| KV
+    CA -->|persists history via MI| CO
+    CA -->|metrics| AI
+    AI --> AG
+```
+
+Resources (all defined in `infra/main.bicep`):
+
+- **Container Apps** — runs the FastAPI service (`/health`, `/analyze/{ticker}`) with a liveness probe and a user-assigned managed identity.
+- **Key Vault** — RBAC + purge-protected; holds the OpenAI key, read via managed identity (never in the image or `.env`).
+- **Cosmos DB (serverless)** — every `SignalBundle` / `TradeThesis` is persisted, partitioned by ticker, for replay and eval.
+- **Application Insights + Log Analytics** — conviction/direction metrics and logs, exported via OpenTelemetry.
+- **Alert rules** — CPU health alert wired to an action group (extendable to domain alerts: pipeline failure, conviction spike).
+
+Full walkthrough — build/push, `bicep` deploy, secret injection, and the
+bare-metal VM alternative — in [docs/deployment.md](docs/deployment.md).
 
 ## Evaluation
 

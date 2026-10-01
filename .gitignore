@@ -39,3 +39,10 @@ scratch/
 
 # LangSmith / tracing
 .langsmith/
+
+# Runtime artifacts (local persistence fallback)
+data/signals.jsonl
+data/theses.jsonl
+
+# Compiled Bicep output
+infra/main.json

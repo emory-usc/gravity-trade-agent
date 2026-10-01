@@ -136,6 +136,20 @@ def backtest() -> None:
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", help="Bind address"),
+    port: int = typer.Option(8080, help="Bind port"),
+) -> None:
+    """Run the HTTP service (FastAPI). Requires the 'web' extra."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]fastapi/uvicorn not installed. Run: uv sync --extra web[/]")
+        raise typer.Exit(1)
+    uvicorn.run("gravity_trade.server:create_app", host=host, port=port, factory=True)
+
+
+@app.command()
 def version() -> None:
     """Print the version."""
     console.print(f"gravity-trade-agent {__version__}")
