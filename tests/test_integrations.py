@@ -70,3 +70,24 @@ def test_telemetry_logging_fallback(caplog, monkeypatch):
     bundle = compute_bundle("SPY", load_sample_data("SPY"))
     telemetry.track_scan(bundle)  # must not raise
     assert "scan ticker=SPY" in caplog.text
+
+
+def test_state_store_fails_loud_when_cosmos_down(tmp_path, monkeypatch):
+    class FailingContainer:
+        def upsert_item(self, doc):
+            raise RuntimeError("cosmos down")
+
+    monkeypatch.setattr(state_store, "_cosmos_container", lambda: FailingContainer())
+    monkeypatch.setattr(state_store, "_SIGNALS_LOCAL", tmp_path / "signals.jsonl")
+
+    bundle = compute_bundle("NVDA", load_sample_data("NVDA"))
+    assert state_store.save_signal(bundle) == "error"
+    # No silent local fallback on a Cosmos failure in production.
+    assert not (tmp_path / "signals.jsonl").exists()
+
+
+def test_health_checks_not_configured(monkeypatch):
+    monkeypatch.delenv("COSMOS_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_KEY_VAULT_URL", raising=False)
+    assert state_store.check_health() == (True, "not_configured")
+    assert secret_store.check_health() == (True, "not_configured")

@@ -7,45 +7,44 @@ real credentials or resource names are committed.
 ## Architecture
 
 ```
-                              ┌──────────────────────────────┐
-                              │        Azure (westus3)        │
-                              │                                │
-   Ingress (HTTPS) ──────────▶│  Container Apps                │
-                              │  ├─ gravity-trade-agent        │
-                              │  │   (FastAPI, :8080)          │
-                              │  └─ user-assigned identity ──┐ │
-                              │                              │ │
-                              │  Key Vault  ◀── RBAC ────────┤ │
-                              │  (openai-api-key)            │ │
-                              │                              │ │
-                              │  Cosmos DB   ◀── RBAC ───────┘ │
-                              │  (serverless, /ticker)         │
-                              │                                │
-                              │  App Insights ◀── metrics ─────┘
-                              │  Log Analytics ◀── logs ───────┘
-                              │  Alert rules ──▶ action group   │
-                              └────────────────────────────────┘
+                                ┌────────────────────────────────────────┐
+                                │          Azure (westus3)               │
+   Ingress (HTTPS + API key) ──▶│  VNet                                   │
+                                │  ├─ Container Apps (scale-to-zero 0→3) │
+                                │  │   ├─ gravity-trade-agent :8080      │
+                                │  │   │   (/health, /ready, /analyze)   │
+                                │  │   └─ user-assigned identity ──────┐ │
+                                │  │                                    │ │
+                                │  ├─ endpoints subnet ── private ──────┤ │
+                                │  │   endpoints (Key Vault, Cosmos)    │ │
+                                │  └─ private DNS zones                  │ │
+                                │                                        │
+                                │  Key Vault (RBAC, purge-protected) ◀───┤
+                                │  Cosmos DB (serverless, /ticker) ◀─────┘
+                                │  App Insights ◀── metrics/logs ────────┘
+                                │  Alert rules ──▶ action group
+                                └────────────────────────────────────────┘
 ```
 
 | Resource | Purpose |
 |----------|---------|
-| **Container Apps** | Runs the FastAPI service (`/health`, `/analyze/{ticker}`) with a liveness probe and a user-assigned managed identity. |
-| **Key Vault** | RBAC-enabled and purge-protected; holds the OpenAI API key. The app reads it via managed identity — never in the image or `.env`. |
-| **Cosmos DB** | Serverless; every `SignalBundle` / `TradeThesis` is upserted here, partitioned by ticker, for replay and eval. |
+| **Container Apps** | Runs the FastAPI service with liveness **and** readiness probes, API-key auth on `/analyze`, and scale-to-zero (0→3 replicas). |
+| **Key Vault** | RBAC-enabled, purge-protected, **private endpoint only**. Holds the OpenAI key and the service API key, read via managed identity. |
+| **Cosmos DB** | Serverless, **private endpoint only**. Every `SignalBundle` / `TradeThesis` is upserted here, partitioned by ticker. |
+| **VNet + private endpoints** | App egress and PaaS access stay on a private network; public access to Key Vault and Cosmos is disabled. |
 | **Application Insights + Log Analytics** | Conviction/direction metrics and structured logs, exported via OpenTelemetry. |
-| **Alert rules** | A CPU health alert wired to an action group; extendable to domain alerts (pipeline failure, conviction spike, scan staleness). |
+| **Alert rules** | CPU health alert + a scan-error log alert, wired to an action group. |
 
 ## Prerequisites
 
 - An Azure subscription and a resource group.
 - `az` CLI logged in (`az login`).
 - A container registry (GitHub Container Registry is used below).
-- An OpenAI API key to store in Key Vault.
+- An OpenAI API key and a service API key to store in Key Vault.
 
 ## 1. Build and push the image
 
 ```bash
-# Tag and push to GHCR (or your ACR).
 export IMAGE=ghcr.io/emory-usc/gravity-trade-agent:latest
 docker build -t "$IMAGE" .
 docker push "$IMAGE"
@@ -63,21 +62,21 @@ az deployment group create \
 ```
 
 This provisions the Container Apps environment + app, Key Vault, Cosmos DB,
-Log Analytics, App Insights, the managed identity, the RBAC grants, and the
-alert rule — all in one deployment.
+the VNet with its subnets, private endpoints + private DNS, Log Analytics,
+App Insights, the managed identity, the RBAC grants, and the alert rules.
 
-## 3. Store the OpenAI key in Key Vault
+## 3. Store secrets in Key Vault
 
 ```bash
 az keyvault secret set \
-  --vault-name "<namePrefix>-kv" \
-  --name "openai-api-key" \
-  --value "$OPENAI_API_KEY"
+  --vault-name "<namePrefix>-kv" --name "openai-api-key" --value "$OPENAI_API_KEY"
+az keyvault secret set \
+  --vault-name "<namePrefix>-kv" --name "gravity-api-key" --value "$GRAVITY_API_KEY"
 ```
 
-The app resolves `OPENAI_API_KEY` by reading the `openai-api-key` secret from
-Key Vault using its managed identity (`secret_store.get_secret` maps the env
-name to the Key Vault-safe name).
+The app resolves `OPENAI_API_KEY` and `GRAVITY_API_KEY` by reading the
+`openai-api-key` / `gravity-api-key` secrets from Key Vault using its managed
+identity (`secret_store.get_secret` maps env names to Key Vault-safe names).
 
 ## 4. Verify
 
@@ -85,23 +84,40 @@ name to the Key Vault-safe name).
 APP_URL=$(az containerapp show -g "$RESOURCE_GROUP" -n "<namePrefix>-app" \
   --query properties.configuration.ingress.fqdn -o tsv)
 
-curl "https://$APP_URL/health"
-curl -X POST "https://$APP_URL/analyze/NVDA"
+curl "https://$APP_URL/health"                 # liveness
+curl "https://$APP_URL/ready"                  # readiness (dependency state)
+curl -X POST "https://$APP_URL/analyze/NVDA" \
+  -H "X-API-Key: $GRAVITY_API_KEY"             # requires the API key
 ```
 
-## Observability
+## Networking
 
-With `APPLICATIONINSIGHTS_CONNECTION_STRING` set (injected by Bicep), the
-service exports a `gravity.conviction` histogram and a `gravity.direction`
-counter via OpenTelemetry. Those metrics, plus structured logs, surface in
-Application Insights and can be charted in Azure Managed Grafana.
+The app runs VNet-integrated with private egress. Key Vault and Cosmos DB have
+`publicNetworkAccess: Disabled` and are reachable only through private
+endpoints; private DNS zones (`privatelink.vaultcore.azure.net` and
+`privatelink.documents.azure.com`) resolve their FQDNs to private IPs.
+
+> For a multi-region Cosmos account, add per-region A records to the
+> `privatelink.documents.azure.com` zone; the single-region case is covered.
+
+## Observability & alerting
+
+With `APPLICATIONINSIGHTS_CONNECTION_STRING` set, the service exports
+`gravity.conviction`, `gravity.direction`, and `gravity.errors` metrics via
+OpenTelemetry. Two alert rules ship with the Bicep:
+
+- **CPU high** — metric alert (CPU > 90% for 5 minutes).
+- **Scan errors** — log alert on `severityLevel >= 3` traces (pipeline failures).
+
+Failures are loud by design: persistence and secret-read errors are logged at
+ERROR level and counted, so the log alert fires instead of the failure being
+silently swallowed.
 
 ## Alternative: bare-metal VM (systemd + cron)
 
 The same code runs un-containerized, matching a classic VM deployment:
 
 ```bash
-# On the VM
 uv sync --extra web
 sudo cp deploy/gravity-trade-agent.service /etc/systemd/system/
 sudo systemctl enable --now gravity-trade-agent
@@ -111,14 +127,13 @@ crontab -e
 #   0 9 * * 1  cd /opt/gravity-trade-agent && uv run gravity analyze NVDA >> /var/log/gravity.log 2>&1
 ```
 
-This is the path the framework's live trading stack already follows — the same
-secrets come from Key Vault via managed identity, and the same Cosmos container
-holds the history.
+The same secrets come from Key Vault via managed identity, and the same Cosmos
+container holds the history.
 
 ## CI/CD
 
 `.github/workflows/deploy.yml` automates steps 1–3: build + push the image to
-GHCR on a tag or manual dispatch, deploy the Bicep, and inject the OpenAI key
-into Key Vault. Required repository secrets: `AZURE_CREDENTIALS` (service
-principal), `AZURE_RESOURCE_GROUP`, `KEYVAULT_NAME`, `ALERT_EMAIL`, and
-`OPENAI_API_KEY`.
+GHCR, scan it with Trivy, deploy the Bicep, and inject the secrets into Key
+Vault. Required repository secrets: `AZURE_CREDENTIALS` (service principal),
+`AZURE_RESOURCE_GROUP`, `KEYVAULT_NAME`, `ALERT_EMAIL`, `OPENAI_API_KEY`, and
+`GRAVITY_API_KEY`.

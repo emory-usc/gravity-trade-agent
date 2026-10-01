@@ -1,11 +1,12 @@
 // Gravity Trade Agent — Azure infrastructure (Bicep).
 //
-// Deploys the full footprint the agent needs in production:
-//   Container Apps (compute) + user-assigned managed identity
-//   Key Vault (secrets, RBAC + purge-protected)
-//   Cosmos DB (serverless; signal/thesis history)
+// Deploys the full, network-isolated footprint the agent needs in production:
+//   Container Apps (compute) + user-assigned managed identity, scale-to-zero
+//   Key Vault (secrets, RBAC + purge-protected, private endpoint only)
+//   Cosmos DB (serverless, private endpoint only)
+//   VNet + subnets (app egress + private endpoints) + private DNS zones
 //   Log Analytics + Application Insights (observability)
-//   A CPU health alert (action group)
+//   Alert rules (CPU health + scan-error log alert)
 //
 // Deploy:
 //   az deployment group create --resource-group <rg> \
@@ -46,7 +47,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 // ---------------------------------------------------------------------------
-// Key Vault — holds the OpenAI API key (read via managed identity)
+// Key Vault — holds the OpenAI + service API keys (read via managed identity).
+// Network-isolated: private endpoint only (publicNetworkAccess disabled).
 // ---------------------------------------------------------------------------
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: '${namePrefix}-kv'
@@ -57,6 +59,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true
     enablePurgeProtection: true
     softDeleteRetentionInDays: 7
+    publicNetworkAccess: 'Disabled'
   }
 }
 
@@ -69,7 +72,7 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
 }
 
 // ---------------------------------------------------------------------------
-// Cosmos DB (serverless) — signal history + trade theses
+// Cosmos DB (serverless) — signal history + trade theses. Private endpoint only.
 // ---------------------------------------------------------------------------
 resource cosmos 'Microsoft.DocumentDB/databaseAccounts@2023-04-15' = {
   name: '${namePrefix}-cosmos'
@@ -79,6 +82,7 @@ resource cosmos 'Microsoft.DocumentDB/databaseAccounts@2023-04-15' = {
     databaseAccountOfferType: 'Standard'
     capabilities: [ { name: 'EnableServerless' } ]
     locations: [ { locationName: location, failoverPriority: 0 } ]
+    publicNetworkAccess: 'Disabled'
   }
 }
 
@@ -102,12 +106,141 @@ resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/con
 }
 
 // ---------------------------------------------------------------------------
-// Container Apps environment + app
+// VNet + subnets — app egress subnet + private-endpoint subnet
+// ---------------------------------------------------------------------------
+resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
+  name: '${namePrefix}-vnet'
+  location: location
+  properties: {
+    addressSpace: { addressPrefixes: [ '10.0.0.0/16' ] }
+  }
+}
+
+resource infraSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-04-01' = {
+  parent: vnet
+  name: 'containerapps'
+  properties: {
+    addressPrefix: '10.0.1.0/24'
+    delegations: [
+      { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
+    ]
+  }
+}
+
+resource endpointsSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-04-01' = {
+  parent: vnet
+  name: 'endpoints'
+  properties: {
+    addressPrefix: '10.0.2.0/24'
+    privateEndpointNetworkPolicies: 'Disabled'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private endpoints for Key Vault + Cosmos
+// ---------------------------------------------------------------------------
+resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-04-01' = {
+  name: '${namePrefix}-kv-pe'
+  location: location
+  properties: {
+    subnet: { id: endpointsSubnet.id }
+    privateLinkServiceConnections: [
+      {
+        name: '${namePrefix}-kv-plc'
+        properties: {
+          privateLinkServiceId: keyVault.id
+          groupIds: [ 'vault' ]
+        }
+      }
+    ]
+  }
+}
+
+resource cosmosPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-04-01' = {
+  name: '${namePrefix}-cosmos-pe'
+  location: location
+  properties: {
+    subnet: { id: endpointsSubnet.id }
+    privateLinkServiceConnections: [
+      {
+        name: '${namePrefix}-cosmos-plc'
+        properties: {
+          privateLinkServiceId: cosmos.id
+          groupIds: [ 'Sql' ]
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private DNS zones + VNet links + A records
+// ---------------------------------------------------------------------------
+resource kvDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+}
+
+resource kvDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: kvDnsZone
+  name: vnet.name
+  location: 'global'
+  properties: {
+    virtualNetwork: { id: vnet.id }
+    registrationEnabled: false
+  }
+}
+
+resource kvDnsRecord 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
+  parent: kvDnsZone
+  name: keyVault.name
+  properties: {
+    ttl: 3600
+    aRecords: [
+      { ipv4Address: kvPrivateEndpoint.properties.customDnsConfigs[0].ipAddresses[0] }
+    ]
+  }
+}
+
+resource cosmosDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.documents.azure.com'
+  location: 'global'
+}
+
+resource cosmosDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: cosmosDnsZone
+  name: vnet.name
+  location: 'global'
+  properties: {
+    virtualNetwork: { id: vnet.id }
+    registrationEnabled: false
+  }
+}
+
+// Note: Cosmos SQL accounts may also need per-region A records; the primary
+// account record below covers the common single-region case.
+resource cosmosDnsRecord 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
+  parent: cosmosDnsZone
+  name: cosmos.name
+  properties: {
+    ttl: 3600
+    aRecords: [
+      { ipv4Address: cosmosPrivateEndpoint.properties.customDnsConfigs[0].ipAddresses[0] }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Container Apps environment + app (VNet-integrated, scale-to-zero)
 // ---------------------------------------------------------------------------
 resource containerEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
   name: '${namePrefix}-env'
   location: location
   properties: {
+    vnetConfiguration: {
+      infrastructureSubnetId: infraSubnet.id
+      internal: false
+    }
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -158,12 +291,26 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               initialDelaySeconds: 10
               periodSeconds: 30
             }
+            {
+              type: 'Readiness'
+              httpGet: { path: '/ready', port: 8080 }
+              initialDelaySeconds: 10
+              periodSeconds: 30
+            }
           ]
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 1
+        minReplicas: 0
+        maxReplicas: 3
+        rules: [
+          {
+            name: 'http-scaling'
+            http: {
+              metadata: { concurrentRequests: '10' }
+            }
+          }
+        ]
       }
     }
   }
@@ -193,7 +340,7 @@ resource cosmosRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Alerting — action group + a CPU health alert
+// Alerting — action group, CPU health alert, scan-error log alert
 // ---------------------------------------------------------------------------
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: '${namePrefix}-alerts'
@@ -230,6 +377,37 @@ resource cpuAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
       ]
     }
     actions: alertEmail != '' ? [ { actionGroupId: actionGroup.id } ] : []
+  }
+}
+
+resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2021-08-01' = {
+  name: '${namePrefix}-scan-errors'
+  location: location
+  properties: {
+    description: 'Gravity Trade scan errors in the last 15 minutes'
+    severity: 1
+    enabled: true
+    evaluationFrequency: 'PT15M'
+    scopes: [ appInsights.id ]
+    windowSize: 'PT15M'
+    criteria: {
+      allOf: [
+        {
+          query: 'traces | where severityLevel >= 3 | summarize Count = count() by bin(timestamp, 5m)'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [ actionGroup.id ]
+    }
   }
 }
 

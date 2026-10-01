@@ -32,6 +32,15 @@ jobs:
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
 
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -52,9 +61,13 @@ jobs:
                          containerImage="ghcr.io/${{ github.repository }}:${{ github.sha }}" \
                          alertEmail="${{ secrets.ALERT_EMAIL }}"
 
-      - name: Store OpenAI key in Key Vault
+      - name: Store secrets in Key Vault
         run: |
           az keyvault secret set \
             --vault-name "${{ secrets.KEYVAULT_NAME }}" \
             --name "openai-api-key" \
             --value "${{ secrets.OPENAI_API_KEY }}"
+          az keyvault secret set \
+            --vault-name "${{ secrets.KEYVAULT_NAME }}" \
+            --name "gravity-api-key" \
+            --value "${{ secrets.GRAVITY_API_KEY }}"

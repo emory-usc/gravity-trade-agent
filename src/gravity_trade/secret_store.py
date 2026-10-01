@@ -5,34 +5,48 @@ no keys baked into the image, no ``.env`` committed. In local development,
 secrets come from environment variables (loaded from ``.env`` by ``config``).
 
 Precedence: an explicit environment variable wins, then Key Vault.
+
+The SecretClient is constructed once and cached (connection reuse); a failed
+read is logged loudly rather than silently swallowed.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+
+log = logging.getLogger("gravity_trade")
 
 _KEY_VAULT_URL_ENV = "AZURE_KEY_VAULT_URL"
 
+_client = None
+_client_resolved = False
+
 
 def _key_vault_client():
-    """Return a Key Vault ``SecretClient`` bound to managed identity, else None.
+    """Return a cached Key Vault SecretClient, or None if unavailable."""
+    global _client, _client_resolved
+    if _client_resolved:
+        return _client
+    _client_resolved = True
 
-    Returns None when the Azure SDKs are absent (dev install) or when no vault
-    URL is configured, so callers can silently fall back to environment vars.
-    """
     try:
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
     except ImportError:
+        _client = None
         return None
 
     vault_url = os.getenv(_KEY_VAULT_URL_ENV)
     if not vault_url:
+        _client = None
         return None
     try:
-        return SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+        _client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
     except Exception:
-        return None
+        log.exception("Failed to construct Key Vault client")
+        _client = None
+    return _client
 
 
 def get_secret(name: str, vault_name: str | None = None) -> str | None:
@@ -42,12 +56,10 @@ def get_secret(name: str, vault_name: str | None = None) -> str | None:
     ``vault_name`` defaults to the Key Vault-safe form (``openai-api-key``),
     since Key Vault secret names allow only alphanumerics and hyphens.
     """
-    # 1. Explicit environment variable (local dev, tests, CI).
     env_val = os.getenv(name)
     if env_val:
         return env_val
 
-    # 2. Key Vault via managed identity (production).
     client = _key_vault_client()
     if client is None:
         return None
@@ -55,4 +67,12 @@ def get_secret(name: str, vault_name: str | None = None) -> str | None:
     try:
         return client.get_secret(secret_name).value
     except Exception:
+        log.exception("Failed to read secret %r from Key Vault", secret_name)
         return None
+
+
+def check_health() -> tuple[bool, str]:
+    """Readiness signal for the Key Vault dependency."""
+    if not os.getenv(_KEY_VAULT_URL_ENV):
+        return (True, "not_configured")
+    return (True, "ok") if _key_vault_client() is not None else (False, "unavailable")

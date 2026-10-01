@@ -180,14 +180,16 @@ flowchart LR
 
 Resources (all defined in `infra/main.bicep`):
 
-- **Container Apps** — runs the FastAPI service (`/health`, `/analyze/{ticker}`) with a liveness probe and a user-assigned managed identity.
-- **Key Vault** — RBAC + purge-protected; holds the OpenAI key, read via managed identity (never in the image or `.env`).
-- **Cosmos DB (serverless)** — every `SignalBundle` / `TradeThesis` is persisted, partitioned by ticker, for replay and eval.
-- **Application Insights + Log Analytics** — conviction/direction metrics and logs, exported via OpenTelemetry.
-- **Alert rules** — CPU health alert wired to an action group (extendable to domain alerts: pipeline failure, conviction spike).
+- **Container Apps** — runs the FastAPI service (`/health`, `/ready`, `/analyze/{ticker}`) with liveness + readiness probes, API-key auth, scale-to-zero (0→3), and a user-assigned managed identity.
+- **Key Vault** — RBAC + purge-protected, **private endpoint only**; holds the OpenAI + service API keys, read via managed identity (never in the image or `.env`).
+- **Cosmos DB (serverless)** — **private endpoint only**; every `SignalBundle` / `TradeThesis` is persisted, partitioned by ticker, for replay and eval.
+- **VNet + private endpoints** — app egress and PaaS access stay on a private network (`publicNetworkAccess: Disabled` on Key Vault and Cosmos).
+- **Application Insights + Log Analytics** — conviction/direction/error metrics and logs, exported via OpenTelemetry.
+- **Alert rules** — CPU health alert + a scan-error log alert, wired to an action group.
 
-Full walkthrough — build/push, `bicep` deploy, secret injection, and the
-bare-metal VM alternative — in [docs/deployment.md](docs/deployment.md).
+Full walkthrough — build/push, `bicep` deploy, secret injection, networking,
+and the bare-metal VM alternative — in [docs/deployment.md](docs/deployment.md).
+See [SECURITY.md](SECURITY.md) for the security posture.
 
 ## Evaluation
 

@@ -33,6 +33,9 @@ class Settings:
     )
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
+    # API key protecting the HTTP service. Resolved via Key Vault in production.
+    api_key: str = field(default_factory=lambda: _resolve_api_key("GRAVITY_API_KEY"))
+
     # Gravity Trade tuning knobs.
     high_conviction_threshold: int = 4  # 4+/6 signals = high conviction
     max_pain_near_pct: float = 0.005  # within 0.5% of max pain = neutral
