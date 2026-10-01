@@ -181,3 +181,10 @@ real log to evaluate a live strategy.
 This is a research and educational project, **not financial advice**. The
 bundled market snapshots and trade log are illustrative synthetic examples.
 Nothing here is a recommendation to buy or sell any security.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Emory Long.
+
+The software is provided "as is", without warranty of any kind, express or
+implied — see [LICENSE](LICENSE) for the full terms and disclaimer.
