@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage: install deps into a venv ---------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 WORKDIR /app
 
 # uv for fast, reproducible installs.
@@ -15,7 +15,7 @@ COPY data ./data
 RUN uv sync --frozen --no-dev --extra web --extra azure
 
 # ---- runtime stage: slim, non-root -----------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 WORKDIR /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
